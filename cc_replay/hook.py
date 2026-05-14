@@ -34,17 +34,21 @@ def main():
         with urllib.request.urlopen(req, timeout=660) as resp:
             result = json.loads(resp.read().decode("utf-8"))
             decision = result.get("decision", {})
-            behavior = decision.get("behavior", "allow")
     except Exception:
-        behavior = "allow"
+        decision = {"behavior": "deny"}
 
-    output = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": behavior,
-        }
+    hook_output: dict = {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": decision.get("behavior", "deny"),
     }
-    print(json.dumps(output))
+    if "updatedInput" in decision:
+        hook_output["updatedInput"] = decision["updatedInput"]
+    if "reason" in decision:
+        hook_output["permissionDecisionReason"] = decision["reason"]
+    if "additionalContext" in decision:
+        hook_output["additionalContext"] = decision["additionalContext"]
+
+    print(json.dumps({"hookSpecificOutput": hook_output}))
 
 
 if __name__ == "__main__":
