@@ -35,6 +35,7 @@ transcript_path: Path | None = None
 transcript_session_id: str = ""
 cc_projects_dir: Path = Path()
 cc_work_dir: Path = Path()
+anthropic_api_key: str = ""
 
 running_processes: dict[str, asyncio.subprocess.Process] = {}
 pending_permissions: dict[str, asyncio.Future] = {}
@@ -318,12 +319,16 @@ async def fork_and_run(request: Request):
             status_code=400,
         )
 
+    import os
+    fork_env = {**os.environ, "ANTHROPIC_API_KEY": anthropic_api_key} if anthropic_api_key else None
+
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         stdin=asyncio.subprocess.PIPE if stdin_data else asyncio.subprocess.DEVNULL,
         cwd=str(cc_work_dir),
+        env=fork_env,
     )
 
     if stdin_data and process.stdin:
@@ -487,13 +492,14 @@ server_port: int = 8765
 
 def main():
     global transcript_events, raw_lines, transcript_path, transcript_session_id
-    global cc_projects_dir, cc_work_dir, server_port
+    global cc_projects_dir, cc_work_dir, server_port, anthropic_api_key
 
     parser = argparse.ArgumentParser(description="View, replay, and fork Claude Code transcripts")
     parser.add_argument("transcript", nargs="?", help="Path to a JSONL transcript file (optional — can upload via browser)")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--cwd", help="Working directory for Claude Code (default: cwd or transcript parent)")
+    parser.add_argument("--api-key-file", help="Path to file containing ANTHROPIC_API_KEY (uses API key auth instead of OAuth, avoids email leak)")
     args = parser.parse_args()
 
     server_port = args.port
@@ -511,6 +517,10 @@ def main():
         transcript_path.parent if transcript_path else Path.cwd()
     )
     cc_projects_dir = find_cc_projects_dir(cc_work_dir)
+    if args.api_key_file:
+        key_text = Path(args.api_key_file).read_text().strip()
+        anthropic_api_key = key_text.split("=", 1)[-1].strip() if "=" in key_text else key_text
+        print(f"  API key: loaded from {args.api_key_file} (no OAuth email)")
     print(f"  CC work dir: {cc_work_dir}")
     print(f"  CC projects dir: {cc_projects_dir}")
 
