@@ -215,6 +215,52 @@
     justify-content: center; box-shadow: 0 2px 8px rgba(0,0,0,0.4); z-index: 100;
   }
   .jump-to-top.visible { display: flex; }
+
+  /* --- Pin button --- */
+  .pin-btn {
+    position: absolute; right: 50px; top: 2px;
+    background: var(--surface2); border: 1px solid var(--border); color: var(--accent);
+    padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600;
+    opacity: 0; transition: opacity 0.15s; z-index: 10;
+  }
+  .message:hover .pin-btn { opacity: 1; }
+  .pin-btn:hover { background: rgba(88,166,255,0.15); border-color: var(--accent); }
+  .pin-btn.pinned { opacity: 1; background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  /* --- Pins panel --- */
+  .pins-panel {
+    position: fixed; bottom: 20px; left: 20px; z-index: 100;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    min-width: 280px; max-width: 380px; box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    font-size: 12px;
+  }
+  .pins-panel.hidden { display: none !important; }
+  .pins-panel-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; border-bottom: 1px solid var(--border); cursor: pointer; user-select: none;
+  }
+  .pins-panel-header span { font-weight: 600; color: var(--accent); }
+  .pins-panel-toggle { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 14px; padding: 0 4px; }
+  .pins-panel-body { max-height: 300px; overflow-y: auto; }
+  .pins-panel.collapsed .pins-panel-body { display: none; }
+  .pin-item {
+    display: flex; align-items: center; gap: 6px; padding: 6px 12px;
+    border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.1s;
+  }
+  .pin-item:hover { background: var(--surface2); }
+  .pin-item:last-child { border-bottom: none; }
+  .pin-item .pin-badge {
+    font-size: 9px; font-weight: 600; padding: 1px 5px; border-radius: 3px; text-transform: uppercase; flex-shrink: 0;
+  }
+  .pin-item .pin-badge.user-badge { background: var(--user-border); color: #fff; }
+  .pin-item .pin-badge.asst-badge { background: #30363d; color: var(--text); }
+  .pin-item .pin-index { color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
+  .pin-item .pin-preview { color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pin-item .pin-remove {
+    background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 14px;
+    padding: 0 2px; flex-shrink: 0; line-height: 1;
+  }
+  .pin-item .pin-remove:hover { color: var(--error); }
 </style>
 </head>
 <body>
@@ -251,12 +297,23 @@
 
 <button class="jump-to-top" id="jump-top" title="Jump to top">&uarr;</button>
 
+<!-- Pins panel -->
+<div class="pins-panel hidden" id="pins-panel">
+  <div class="pins-panel-header" onclick="togglePinsPanel()">
+    <span id="pins-panel-title">Pins (0)</span>
+    <button class="pins-panel-toggle" id="pins-panel-toggle">&#9660;</button>
+  </div>
+  <div class="pins-panel-body" id="pins-panel-body"></div>
+</div>
+
 <script>
 let transcriptEvents = [];
 let pollingInterval = null;
 let currentProcessId = null;
 let currentOutputDiv = null;
 const renderedPermIds = new Set();
+// Pins state
+const pins = []; // Array of { index, type, lineNum, preview }
 
 const uploadScreen = document.getElementById('upload-screen');
 const viewerEl = document.getElementById('viewer');
@@ -401,6 +458,7 @@ function renderUserEvent(event) {
   if (event.timestamp) header.appendChild(mkEl('span', 'timestamp', new Date(event.timestamp).toLocaleTimeString()));
   header.appendChild(mkEl('span', 'line-tag', `L${event.line_num}`));
   div.appendChild(header);
+  div.appendChild(makePinBtn(event));
   div.appendChild(makeForkBtn(event.index));
 
   const body = document.createElement('div');
@@ -444,6 +502,7 @@ function renderAssistantEvent(event) {
     header.appendChild(mkEl('span', 'meta-tag', event.stop_reason));
   }
   div.appendChild(header);
+  div.appendChild(makePinBtn(event));
   div.appendChild(makeForkBtn(event.index));
 
   const body = document.createElement('div');
@@ -949,6 +1008,108 @@ function makeForkBtn(index) {
   btn.className = 'fork-btn'; btn.textContent = 'Fork';
   btn.onclick = (e) => { e.stopPropagation(); doFork(index); };
   return btn;
+}
+
+function makePinBtn(event) {
+  const btn = document.createElement('button');
+  btn.className = 'pin-btn';
+  btn.dataset.pinIndex = event.index;
+  const isPinned = pins.some(p => p.index === event.index);
+  btn.textContent = '\u{1F4CC}';
+  if (isPinned) btn.classList.add('pinned');
+  btn.onclick = (e) => { e.stopPropagation(); togglePin(event, btn); };
+  return btn;
+}
+
+function togglePin(event, btn) {
+  const existingIdx = pins.findIndex(p => p.index === event.index);
+  if (existingIdx !== -1) {
+    pins.splice(existingIdx, 1);
+    btn.classList.remove('pinned');
+  } else {
+    const preview = getEventPreview(event, 60);
+    pins.push({ index: event.index, type: event.type, lineNum: event.line_num, preview });
+    btn.classList.add('pinned');
+  }
+  renderPinsPanel();
+}
+
+function getEventPreview(event, maxLen) {
+  const content = event.content;
+  let text = '';
+  if (typeof content === 'string') {
+    text = content;
+  } else if (Array.isArray(content)) {
+    for (const block of content) {
+      if (block.type === 'text' && block.text) { text = block.text; break; }
+      if (block.type === 'tool_use') { text = `[${block.name}] ${JSON.stringify(block.input || {}).slice(0, maxLen)}`; break; }
+      if (block.type === 'thinking' && block.thinking) { text = block.thinking; break; }
+      if (block.type === 'tool_result') { text = typeof block.content === 'string' ? block.content : JSON.stringify(block.content || ''); break; }
+    }
+  }
+  text = text.replace(/\n/g, ' ').trim();
+  return text.length > maxLen ? text.slice(0, maxLen) + '...' : text;
+}
+
+function renderPinsPanel() {
+  const panel = document.getElementById('pins-panel');
+  const title = document.getElementById('pins-panel-title');
+  const body = document.getElementById('pins-panel-body');
+  if (pins.length === 0) {
+    panel.classList.add('hidden');
+    return;
+  }
+  panel.classList.remove('hidden');
+  title.textContent = `Pins (${pins.length})`;
+  body.innerHTML = '';
+  for (const pin of pins) {
+    const item = document.createElement('div');
+    item.className = 'pin-item';
+
+    const badge = document.createElement('span');
+    badge.className = 'pin-badge ' + (pin.type === 'user' ? 'user-badge' : 'asst-badge');
+    badge.textContent = pin.type === 'user' ? 'USER' : 'ASST';
+    item.appendChild(badge);
+
+    const idx = document.createElement('span');
+    idx.className = 'pin-index';
+    idx.textContent = `#${pin.index} L${pin.lineNum}`;
+    item.appendChild(idx);
+
+    const preview = document.createElement('span');
+    preview.className = 'pin-preview';
+    preview.textContent = pin.preview;
+    item.appendChild(preview);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'pin-remove';
+    removeBtn.textContent = '×';
+    removeBtn.title = 'Unpin';
+    removeBtn.onclick = (e) => {
+      e.stopPropagation();
+      const i = pins.findIndex(p => p.index === pin.index);
+      if (i !== -1) pins.splice(i, 1);
+      // Update pin button in transcript
+      const pinBtn = container.querySelector(`.pin-btn[data-pin-index="${pin.index}"]`);
+      if (pinBtn) pinBtn.classList.remove('pinned');
+      renderPinsPanel();
+    };
+    item.appendChild(removeBtn);
+
+    item.onclick = () => {
+      const el = container.querySelector(`.message[data-index="${pin.index}"]`);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    };
+
+    body.appendChild(item);
+  }
+}
+
+function togglePinsPanel() {
+  const panel = document.getElementById('pins-panel');
+  const toggle = document.getElementById('pins-panel-toggle');
+  panel.classList.toggle('collapsed');
+  toggle.innerHTML = panel.classList.contains('collapsed') ? '&#9654;' : '&#9660;';
 }
 
 function makeFoldable(text, previewLen = 300) {
