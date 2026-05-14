@@ -360,6 +360,7 @@ function renderTranscript() {
         const divider = document.createElement('div');
         divider.className = 'turn-divider';
         divider.dataset.type = 'turn-divider';
+        divider.dataset.index = event.index;
         const label = document.createElement('span');
         label.className = 'turn-divider-label';
         label.textContent = `Turn ${turnCount}`;
