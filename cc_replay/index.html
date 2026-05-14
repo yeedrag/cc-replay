@@ -215,6 +215,13 @@
     justify-content: center; box-shadow: 0 2px 8px rgba(0,0,0,0.4); z-index: 100;
   }
   .jump-to-top.visible { display: flex; }
+
+  /* --- Stop All Forks button --- */
+  .stop-all-forks-btn {
+    background: var(--error); border: none; color: #fff; padding: 4px 12px;
+    border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600;
+  }
+  .stop-all-forks-btn:hover { opacity: 0.9; }
 </style>
 </head>
 <body>
@@ -244,6 +251,7 @@
     <label>Effort: <select id="fork-effort"><option value="medium">medium</option><option value="high" selected>high</option><option value="max">max</option></select></label>
     <input type="text" id="search" placeholder="Search...">
     <button class="load-new-btn" id="load-new-btn">Load new</button>
+    <button class="stop-all-forks-btn hidden" id="stop-all-forks-btn" onclick="stopAllForks()">Stop All Forks</button>
     <span class="stats" id="stats"></span>
   </div>
   <div id="messages-container"></div>
@@ -253,10 +261,9 @@
 
 <script>
 let transcriptEvents = [];
-let pollingInterval = null;
-let currentProcessId = null;
-let currentOutputDiv = null;
-const renderedPermIds = new Set();
+// Multi-fork state
+const activeForks = new Map(); // processId -> { eventIndex, outputDiv, eventSource, renderedPermIds, pollingInterval, forkNum, bannerEl }
+let forkCounter = 0;
 
 const uploadScreen = document.getElementById('upload-screen');
 const viewerEl = document.getElementById('viewer');
@@ -634,26 +641,44 @@ function makeToolResultBlock(block) {
 }
 
 // --- Fork ---
-async function doFork(eventIndex) {
-  document.querySelectorAll('.fork-banner, .fork-output').forEach(b => b.remove());
-  if (currentProcessId) {
-    fetch(`/api/stop/${currentProcessId}`, { method: 'POST' });
-    currentProcessId = null;
+function updateStopAllBtn() {
+  const btn = document.getElementById('stop-all-forks-btn');
+  if (activeForks.size > 0) btn.classList.remove('hidden');
+  else btn.classList.add('hidden');
+}
+
+async function stopAllForks() {
+  const ids = Array.from(activeForks.keys());
+  for (const pid of ids) {
+    await cancelFork(pid);
   }
+}
 
-  Array.from(container.querySelectorAll('.message, .turn-divider')).forEach(msg => {
-    const idx = parseInt(msg.dataset.index);
-    if (!isNaN(idx) && idx > eventIndex) msg.remove();
-  });
+async function doFork(eventIndex) {
+  // Do NOT remove messages or cancel existing forks
+  forkCounter++;
+  const forkNum = forkCounter;
+  const forkId = `fork-${forkNum}`;
 
+  const ev = transcriptEvents[eventIndex];
+  const hasToolUse = ev && ev.type === 'assistant' && Array.isArray(ev.content) &&
+    ev.content.some(b => b.type === 'tool_use');
+
+  const hasOtherForks = activeForks.size > 0;
   const banner = document.createElement('div');
   banner.className = 'fork-banner';
+  banner.id = `fork-banner-${forkId}`;
   banner.innerHTML = `
-    <h3>Fork at event #${eventIndex}</h3>
+    <h3>Fork #${forkNum} at event #${eventIndex}</h3>
+    ${hasOtherForks ? '<div class="info" style="color:var(--warning)">Note: shares working directory with other active forks</div>' : ''}
+    ${hasToolUse ? `<label style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:12px;color:var(--text-muted);cursor:pointer">
+      <input type="checkbox" class="strip-tool-use-cb" style="accent-color:var(--fork-color)">
+      Strip tool calls (keep text, regenerate tool use)
+    </label>` : ''}
     <div style="display:flex;gap:8px;align-items:flex-end;margin-top:8px">
-      <textarea id="fork-prompt" placeholder="Message (empty = continue with original tool result, only works on tool_use events)" style="flex:1;min-height:38px;max-height:150px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:4px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
-      <button onclick="runFork(${eventIndex})" style="background:var(--fork-color);border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600;white-space:nowrap">Run</button>
-      <button onclick="cancelFork()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px">Cancel</button>
+      <textarea class="fork-prompt-input" placeholder="${hasToolUse ? 'Message (empty = continue with original tool result)' : 'Message (required for non-tool_use events)'}" style="flex:1;min-height:38px;max-height:150px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:4px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+      <button onclick="runFork(${eventIndex}, '${forkId}')" style="background:var(--fork-color);border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600;white-space:nowrap">Run</button>
+      <button onclick="removeForkBanner('${forkId}')" style="background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px">Cancel</button>
     </div>
   `;
 
@@ -661,59 +686,96 @@ async function doFork(eventIndex) {
   if (msg && msg.nextSibling) container.insertBefore(banner, msg.nextSibling);
   else container.appendChild(banner);
   banner.scrollIntoView({ block: 'center' });
-  document.getElementById('fork-prompt').focus();
+  banner.querySelector('.fork-prompt-input').focus();
 }
 
-async function cancelFork() {
-  document.querySelectorAll('.fork-banner, .fork-output').forEach(b => b.remove());
-  if (currentProcessId) {
-    await fetch(`/api/stop/${currentProcessId}`, { method: 'POST' });
-    currentProcessId = null;
-  }
-  currentOutputDiv = null;
-  renderedPermIds.clear();
-  stopPolling();
-  renderTranscript();
+function removeForkBanner(forkId) {
+  const banner = document.getElementById(`fork-banner-${forkId}`);
+  if (banner) banner.remove();
+  const output = document.getElementById(`fork-output-${forkId}`);
+  if (output) output.remove();
 }
 
-async function runFork(eventIndex) {
-  const promptEl = document.getElementById('fork-prompt');
+async function cancelFork(processId) {
+  const fork = activeForks.get(processId);
+  if (!fork) return;
+  // Stop the process
+  try { await fetch(`/api/stop/${processId}`, { method: 'POST' }); } catch (e) {}
+  // Close event source
+  if (fork.eventSource) { try { fork.eventSource.close(); } catch(e) {} }
+  // Stop polling
+  if (fork.pollingInterval) clearInterval(fork.pollingInterval);
+  // Remove DOM elements for this fork
+  const banner = document.getElementById(`fork-banner-${fork.forkId}`);
+  if (banner) banner.remove();
+  const output = document.getElementById(`fork-output-${fork.forkId}`);
+  if (output) output.remove();
+  // Remove from map
+  activeForks.delete(processId);
+  updateStopAllBtn();
+}
+
+async function runFork(eventIndex, forkId) {
+  const banner = document.getElementById(`fork-banner-${forkId}`);
+  const promptEl = banner ? banner.querySelector('.fork-prompt-input') : null;
   const prompt = promptEl ? promptEl.value.trim() : '';
   const effort = document.getElementById('fork-effort').value;
+  const stripEl = banner ? banner.querySelector('.strip-tool-use-cb') : null;
+  const stripToolUse = stripEl ? stripEl.checked : false;
 
-  const banner = document.querySelector('.fork-banner');
-  if (banner) banner.innerHTML = '<h3 style="color:var(--fork-color)">Starting Claude Code...</h3>';
+  if (banner) banner.innerHTML = `<h3 style="color:var(--fork-color)">Fork #${forkId.replace('fork-','')} - Starting Claude Code...</h3>`;
 
   const resp = await fetch('/api/fork-and-run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fork_index: eventIndex, prompt, effort }),
+    body: JSON.stringify({ fork_index: eventIndex, prompt, effort, strip_tool_use: stripToolUse }),
   });
   const data = await resp.json();
   if (data.error) {
-    if (banner) banner.innerHTML = `<h3 style="color:var(--error)">Error: ${escapeHtml(data.error)}</h3><button onclick="cancelFork()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;margin-top:8px">Back</button>`;
+    if (banner) banner.innerHTML = `<h3 style="color:var(--error)">Fork #${forkId.replace('fork-','')} Error: ${escapeHtml(data.error)}</h3><button onclick="removeForkBanner('${forkId}')" style="background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;margin-top:8px">Dismiss</button>`;
     return;
   }
 
-  currentProcessId = data.process_id;
-  renderedPermIds.clear();
+  const processId = data.process_id;
+  const forkRenderedPermIds = new Set();
 
-  if (banner) {
-    banner.innerHTML = `
-      <h3>Claude Code running (forked at L${data.fork_at_line})</h3>
-      <div class="info">${data.truncated_lines} / ${data.total_lines} lines | Mode: <strong>${data.mode}</strong> | Session: ${data.session_id}</div>
-      <button onclick="cancelFork()" style="background:var(--error);border:none;color:#fff;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin-top:4px">Stop</button>
-    `;
-  }
-
-  startPolling();
-
+  // Create output div
   const outputDiv = document.createElement('div');
   outputDiv.className = 'fork-output';
+  outputDiv.id = `fork-output-${forkId}`;
   outputDiv.style.cssText = 'max-width:950px;margin:8px auto;';
   if (banner) banner.after(outputDiv);
   else container.appendChild(outputDiv);
-  currentOutputDiv = outputDiv;
+
+  if (banner) {
+    const forkNum = forkId.replace('fork-','');
+    banner.innerHTML = `
+      <h3>Fork #${forkNum} - Claude Code running (forked at L${data.fork_at_line})</h3>
+      <div class="info">${data.truncated_lines} / ${data.total_lines} lines | Mode: <strong>${data.mode}</strong> | Session: ${data.session_id}</div>
+      ${activeForks.size > 0 ? '<div class="info" style="color:var(--warning)">Note: shares working directory with other active forks</div>' : ''}
+      <button onclick="cancelFork('${processId}')" style="background:var(--error);border:none;color:#fff;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin-top:4px">Stop</button>
+    `;
+  }
+
+  // Start per-fork permission polling
+  const forkPollingInterval = setInterval(() => pollForkPermissions(processId), 1000);
+  pollForkPermissions(processId);
+
+  // Create SSE connection
+  const eventSource = new EventSource(`/api/stream/${processId}`);
+
+  // Store in activeForks map
+  activeForks.set(processId, {
+    eventIndex,
+    outputDiv,
+    eventSource,
+    renderedPermIds: forkRenderedPermIds,
+    pollingInterval: forkPollingInterval,
+    forkNum: parseInt(forkId.replace('fork-','')),
+    forkId,
+    bannerEl: banner,
+  });
+  updateStopAllBtn();
 
   if (data.tool_result_sent) {
     const trDiv = document.createElement('div');
@@ -732,15 +794,19 @@ async function runFork(eventIndex) {
     outputDiv.appendChild(trDiv);
   }
 
-  const eventSource = new EventSource(`/api/stream/${data.process_id}`);
   let currentAssistantBody = null;
 
   eventSource.onmessage = (sseEvent) => {
+    // Capture processId and outputDiv in closure
+    const myFork = activeForks.get(processId);
+    const myOutputDiv = myFork ? myFork.outputDiv : outputDiv;
+    const myBanner = myFork ? myFork.bannerEl : banner;
+
     let event;
     try { event = JSON.parse(sseEvent.data); } catch { return; }
 
     if (event.type === 'system') {
-      outputDiv.appendChild(mkEl('div', 'info', `Model: ${event.model} | Session: ${event.session_id}`));
+      myOutputDiv.appendChild(mkEl('div', 'info', `Model: ${event.model} | Session: ${event.session_id}`));
     }
 
     else if (event.type === 'assistant') {
@@ -757,7 +823,7 @@ async function runFork(eventIndex) {
         currentAssistantBody = document.createElement('div');
         currentAssistantBody.className = 'msg-body';
         div.appendChild(currentAssistantBody);
-        outputDiv.appendChild(div);
+        myOutputDiv.appendChild(div);
       }
       for (const block of msg.content) {
         if (block.type === 'text' && block.text) {
@@ -806,7 +872,7 @@ async function runFork(eventIndex) {
         }
       }
       div.appendChild(body);
-      outputDiv.appendChild(div);
+      myOutputDiv.appendChild(div);
     }
 
     else if (event.type === 'result') {
@@ -814,51 +880,51 @@ async function runFork(eventIndex) {
       const rd = document.createElement('div');
       rd.style.cssText = 'font-size:11px;color:var(--text-muted);padding:8px 0;max-width:950px;margin:0 auto;border-top:1px solid var(--border);margin-top:8px;';
       rd.textContent = `Done (${event.stop_reason}) | ${event.num_turns} turn(s) | $${(event.total_cost_usd||0).toFixed(4)} | ${((event.duration_ms||0)/1000).toFixed(1)}s`;
-      outputDiv.appendChild(rd);
-      if (banner) { const h3 = banner.querySelector('h3'); if (h3) h3.textContent = 'Claude Code finished'; }
+      myOutputDiv.appendChild(rd);
+      if (myBanner) { const h3 = myBanner.querySelector('h3'); if (h3) h3.textContent = `Fork #${forkId.replace('fork-','')} - finished`; }
       eventSource.close();
-      currentProcessId = null;
-      stopPolling();
+      // Stop polling for this fork
+      if (myFork && myFork.pollingInterval) clearInterval(myFork.pollingInterval);
+      activeForks.delete(processId);
+      updateStopAllBtn();
     }
 
     else if (event.type === 'stderr') {
       const d = document.createElement('div');
       d.style.cssText = 'font-size:11px;color:var(--warning);background:rgba(210,153,34,0.1);padding:6px 10px;border-radius:4px;margin:6px 0;white-space:pre-wrap;font-family:monospace;';
       d.textContent = (event.lines || []).join('\n');
-      outputDiv.appendChild(d);
+      myOutputDiv.appendChild(d);
     }
 
     else if (event.type === 'process_exit' || event.type === 'error') {
       eventSource.close();
-      currentProcessId = null;
-      stopPolling();
-      if (event.type === 'error') outputDiv.appendChild(mkEl('div', 'error-msg', `Error: ${event.error}`));
-      if (event.type === 'process_exit' && event.return_code !== 0) outputDiv.appendChild(mkEl('div', 'error-msg', `Process exited with code ${event.return_code}`));
+      if (myFork && myFork.pollingInterval) clearInterval(myFork.pollingInterval);
+      activeForks.delete(processId);
+      updateStopAllBtn();
+      if (event.type === 'error') myOutputDiv.appendChild(mkEl('div', 'error-msg', `Error: ${event.error}`));
+      if (event.type === 'process_exit' && event.return_code !== 0) myOutputDiv.appendChild(mkEl('div', 'error-msg', `Process exited with code ${event.return_code}`));
     }
   };
 
-  eventSource.onerror = () => { eventSource.close(); currentProcessId = null; stopPolling(); };
+  eventSource.onerror = () => {
+    eventSource.close();
+    const myFork = activeForks.get(processId);
+    if (myFork && myFork.pollingInterval) clearInterval(myFork.pollingInterval);
+    activeForks.delete(processId);
+    updateStopAllBtn();
+  };
 }
 
-// --- Permission Polling ---
-function startPolling() {
-  if (pollingInterval) clearInterval(pollingInterval);
-  pollingInterval = setInterval(pollPermissions, 1000);
-  pollPermissions();
-}
-
-function stopPolling() {
-  if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
-}
-
-async function pollPermissions() {
-  if (!currentOutputDiv) return;
+// --- Permission Polling (per-fork) ---
+async function pollForkPermissions(processId) {
+  const fork = activeForks.get(processId);
+  if (!fork || !fork.outputDiv) return;
   try {
-    const resp = await fetch('/api/permissions');
+    const resp = await fetch(`/api/permissions/${processId}`);
     const data = await resp.json();
 
     for (const perm of [...data.pending, ...data.recent]) {
-      if (renderedPermIds.has(perm.id)) {
+      if (fork.renderedPermIds.has(perm.id)) {
         const existing = document.getElementById(`perm-${perm.id}`);
         if (existing && perm.decided) {
           existing.className = 'perm-card decided';
@@ -868,9 +934,9 @@ async function pollPermissions() {
         continue;
       }
 
-      renderedPermIds.add(perm.id);
+      fork.renderedPermIds.add(perm.id);
       const card = renderPermissionCard(perm);
-      currentOutputDiv.appendChild(card);
+      fork.outputDiv.appendChild(card);
       card.scrollIntoView({ block: 'end' });
     }
   } catch (e) {}

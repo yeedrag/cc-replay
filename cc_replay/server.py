@@ -39,7 +39,9 @@ anthropic_api_key: str = ""
 
 running_processes: dict[str, asyncio.subprocess.Process] = {}
 pending_permissions: dict[str, asyncio.Future] = {}
-permission_history: list[dict] = []
+# Per-process permission history: process_id -> list of permission entries
+permission_history: dict[str, list[dict]] = {}
+workdir_snapshots: dict[str, Path] = {}  # session_id -> snapshot tarball path
 
 
 # --- Transcript Parsing ---
@@ -244,17 +246,55 @@ async def fork_and_run(request: Request):
     fork_index = body["fork_index"]
     prompt = body.get("prompt", "")
     effort = body.get("effort", "high")
+    strip_tool_use = body.get("strip_tool_use", False)
 
     if fork_index < 0 or fork_index >= len(transcript_events):
         return JSONResponse({"error": "Invalid fork index"}, status_code=400)
 
-    pending_permissions.clear()
-    permission_history.clear()
+    fork_event = transcript_events[fork_index]
 
     trunc_line_idx = get_truncation_line_idx(transcript_events, fork_index)
     truncated_lines = raw_lines[:trunc_line_idx]
 
+    if strip_tool_use and fork_event["type"] == "assistant":
+        # Remove tool_use blocks from the last assistant message's raw lines.
+        # Keep text/thinking, drop lines that are pure tool_use content.
+        msg_id = fork_event.get("msg_id", "")
+        if msg_id:
+            filtered: list[str] = []
+            for line in truncated_lines:
+                stripped = line.strip()
+                if not stripped:
+                    filtered.append(line)
+                    continue
+                try:
+                    obj = json.loads(stripped)
+                except json.JSONDecodeError:
+                    filtered.append(line)
+                    continue
+                if (obj.get("type") == "assistant"
+                    and obj.get("message", {}).get("id") == msg_id):
+                    content = obj["message"].get("content", [])
+                    if isinstance(content, list) and all(
+                        b.get("type") == "tool_use" for b in content if isinstance(b, dict)
+                    ):
+                        continue  # drop this line (pure tool_use)
+                filtered.append(line)
+            truncated_lines = filtered
+            print(f"[FORK] Stripped tool_use blocks from assistant msg {msg_id[:20]}")
+
     new_session_id = str(uuid.uuid4())
+    permission_history[new_session_id] = []
+
+    # Snapshot the work directory so we can restore after the fork
+    import subprocess, tempfile
+    snapshot_path = Path(tempfile.mktemp(suffix=".tar", prefix=f"cc-replay-snap-{new_session_id[:8]}-"))
+    subprocess.run(
+        ["tar", "cf", str(snapshot_path), "-C", str(cc_work_dir.parent), cc_work_dir.name],
+        check=True, capture_output=True,
+    )
+    workdir_snapshots[new_session_id] = snapshot_path
+    print(f"[FORK] Snapshot: {snapshot_path} ({snapshot_path.stat().st_size} bytes)")
     cc_projects_dir.mkdir(parents=True, exist_ok=True)
     session_file = cc_projects_dir / f"{new_session_id}.jsonl"
     session_file.write_text("".join(truncated_lines), encoding="utf-8")
@@ -290,12 +330,11 @@ async def fork_and_run(request: Request):
         "--settings", str(settings_file),
     ]
 
-    fork_event = transcript_events[fork_index]
     mode = "unknown"
     tool_result_blocks: list[dict] = []
     stdin_data: bytes | None = None
 
-    if event_ends_with_tool_use(fork_event) and not prompt:
+    if event_ends_with_tool_use(fork_event) and not strip_tool_use and not prompt:
         tool_result_blocks = extract_tool_result_content(transcript_events, fork_index)
         if tool_result_blocks:
             stdin_msg = json.dumps({
@@ -319,7 +358,7 @@ async def fork_and_run(request: Request):
             status_code=400,
         )
 
-    import os
+    import os, signal
     fork_env = {**os.environ, "ANTHROPIC_API_KEY": anthropic_api_key} if anthropic_api_key else None
 
     process = await asyncio.create_subprocess_exec(
@@ -329,6 +368,7 @@ async def fork_and_run(request: Request):
         stdin=asyncio.subprocess.PIPE if stdin_data else asyncio.subprocess.DEVNULL,
         cwd=str(cc_work_dir),
         env=fork_env,
+        start_new_session=True,  # create process group so we can kill all children
     )
 
     if stdin_data and process.stdin:
@@ -403,10 +443,23 @@ async def stream_output(process_id: str):
 async def stop_process(process_id: str):
     process = running_processes.pop(process_id, None)
     if process:
-        process.kill()
+        _kill_process_tree(process)
         _do_cleanup(process_id)
         return JSONResponse({"stopped": True})
     return JSONResponse({"stopped": False})
+
+
+def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
+    import os, signal
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    # Follow up with SIGKILL after a short delay
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 # --- Permission Hook Endpoints ---
@@ -415,16 +468,18 @@ async def stop_process(process_id: str):
 async def handle_permission_request(request: Request):
     body = await request.json()
     req_id = body.get("tool_use_id", str(uuid.uuid4()))
+    process_id = body.get("session_id", "")
 
     permission_entry = {
         "id": req_id,
+        "process_id": process_id,
         "tool_name": body.get("tool_name", "?"),
         "tool_input": body.get("tool_input", {}),
         "timestamp": body.get("timestamp"),
         "decided": False,
         "decision": None,
     }
-    permission_history.append(permission_entry)
+    permission_history.setdefault(process_id, []).append(permission_entry)
 
     loop = asyncio.get_event_loop()
     future: asyncio.Future = loop.create_future()
@@ -442,10 +497,11 @@ async def handle_permission_request(request: Request):
     return JSONResponse({"decision": decision})
 
 
-@app.get("/api/permissions")
-async def get_permissions():
-    pending = [p for p in permission_history if not p["decided"]]
-    recent = [p for p in permission_history if p["decided"]][-10:]
+@app.get("/api/permissions/{process_id}")
+async def get_permissions(process_id: str):
+    entries = permission_history.get(process_id, [])
+    pending = [p for p in entries if not p["decided"]]
+    recent = [p for p in entries if p["decided"]][-10:]
     return JSONResponse({"pending": pending, "recent": recent})
 
 
@@ -477,6 +533,20 @@ def _do_cleanup(session_id: str) -> list[str]:
     if session_dir.exists():
         shutil.rmtree(session_dir, ignore_errors=True)
         deleted.append(str(session_dir))
+
+    permission_history.pop(session_id, None)
+
+    # Restore work directory from snapshot
+    import subprocess
+    snapshot = workdir_snapshots.pop(session_id, None)
+    if snapshot and snapshot.exists():
+        subprocess.run(
+            ["tar", "xf", str(snapshot), "-C", str(cc_work_dir.parent)],
+            check=True, capture_output=True,
+        )
+        snapshot.unlink()
+        print(f"[CLEANUP] Restored {cc_work_dir} from snapshot")
+
     return deleted
 
 
