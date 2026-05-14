@@ -1,0 +1,1017 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cc-replay</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --surface2: #1c2129;
+    --border: #30363d; --text: #e6edf3; --text-muted: #8b949e;
+    --user-bg: #1a3a5c; --user-border: #2563eb;
+    --assistant-bg: #1c2129; --assistant-border: #30363d;
+    --thinking-bg: #1a1a2e; --thinking-border: #7c3aed;
+    --tool-bg: #1a1e24; --tool-border: #444c56;
+    --accent: #58a6ff; --warning: #d29922; --error: #f85149;
+    --fork-color: #f97316; --fork-bg: rgba(249,115,22,0.1);
+    --success: #3fb950;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.6;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+
+  /* --- Upload screen --- */
+  #upload-screen {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100vh; gap: 16px; padding: 40px;
+  }
+  #upload-screen.hidden { display: none; }
+
+  .drop-area {
+    border: 2px dashed var(--border); border-radius: 12px;
+    padding: 60px 40px; text-align: center; cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    max-width: 600px; width: 100%;
+  }
+  .drop-area:hover, .drop-area.dragover {
+    border-color: var(--accent); background: rgba(88,166,255,0.05);
+  }
+  .drop-area h2 { color: var(--accent); margin-bottom: 8px; }
+  .drop-area p { color: var(--text-muted); font-size: 14px; }
+
+  .file-input { display: none; }
+
+  /* --- Main viewer --- */
+  #viewer { display: none; flex-direction: column; height: 100vh; }
+  #viewer.active { display: flex; }
+
+  header {
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: 10px 20px; display: flex; align-items: center; gap: 16px; flex-shrink: 0;
+  }
+  header h1 { font-size: 16px; font-weight: 600; color: var(--accent); }
+  header .meta { font-size: 12px; color: var(--text-muted); }
+
+  .controls {
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: 6px 20px; display: flex; gap: 12px; align-items: center; flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  .controls label { font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  .controls input[type="checkbox"] { accent-color: var(--accent); }
+  .controls select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 2px 6px; border-radius: 3px; font-size: 11px; }
+  #search {
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    padding: 4px 10px; border-radius: 6px; font-size: 12px; width: 200px;
+  }
+  #search::placeholder { color: var(--text-muted); }
+  #search:focus { outline: none; border-color: var(--accent); }
+  .stats { margin-left: auto; font-size: 12px; color: var(--text-muted); }
+
+  .load-new-btn {
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text-muted);
+    padding: 2px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;
+  }
+  .load-new-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  #messages-container { flex: 1; overflow-y: auto; padding: 20px; }
+
+  /* --- Messages --- */
+  .message { margin-bottom: 10px; max-width: 950px; margin-left: auto; margin-right: auto; position: relative; }
+  .msg-header { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; flex-wrap: wrap; }
+  .role-badge { font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .role-user .role-badge { background: var(--user-border); color: #fff; }
+  .role-assistant .role-badge { background: #30363d; color: var(--text); }
+  .timestamp { font-size: 10px; color: var(--text-muted); }
+  .model-tag { font-size: 10px; color: var(--text-muted); background: var(--surface2); padding: 1px 5px; border-radius: 3px; }
+  .meta-tag { font-size: 10px; color: var(--warning); background: rgba(210,153,34,0.15); padding: 1px 5px; border-radius: 3px; }
+  .line-tag { font-size: 10px; color: var(--text-muted); }
+  .usage-tag { font-size: 10px; padding: 1px 5px; border-radius: 3px; background: var(--surface2); }
+
+  .fork-btn {
+    position: absolute; right: -10px; top: 2px;
+    background: var(--surface2); border: 1px solid var(--border); color: var(--fork-color);
+    padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600;
+    opacity: 0; transition: opacity 0.15s; z-index: 10;
+  }
+  .message:hover .fork-btn { opacity: 1; }
+  .fork-btn:hover { background: var(--fork-bg); border-color: var(--fork-color); }
+
+  .msg-body {
+    padding: 10px 14px; border-radius: 6px; border: 1px solid;
+    font-size: 13px; overflow-x: auto;
+  }
+  .msg-body p { margin: 4px 0; }
+  .msg-body pre { background: var(--bg); padding: 8px 10px; border-radius: 4px; overflow-x: auto; font-size: 12px; margin: 6px 0; white-space: pre-wrap; word-break: break-word; }
+  .msg-body code { background: var(--bg); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+  .role-user .msg-body { background: var(--user-bg); border-color: var(--user-border); }
+  .role-assistant .msg-body { background: var(--assistant-bg); border-color: var(--assistant-border); }
+
+  /* --- Thinking --- */
+  .thinking-block { margin: 6px 0; border: 1px solid var(--thinking-border); border-radius: 4px; overflow: hidden; }
+  .thinking-label { font-size: 10px; font-weight: 600; color: var(--thinking-border); text-transform: uppercase; }
+
+  /* --- Collapsible --- */
+  .collapsible { margin: 6px 0; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+  .collapsible-header { padding: 4px 10px; font-size: 11px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 4px; user-select: none; background: var(--surface2); }
+  .collapsible-header::before { content: '\25B6'; font-size: 9px; transition: transform 0.15s; }
+  .collapsible.open .collapsible-header::before { transform: rotate(90deg); }
+  .collapsible-body { display: none; padding: 8px 10px; font-size: 12px; max-height: 600px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; font-family: 'Cascadia Code', 'Fira Code', monospace; }
+  .collapsible.open .collapsible-body { display: block; }
+
+  .thinking-block .collapsible-header { background: var(--thinking-bg); color: #a78bfa; }
+  .thinking-block .collapsible-body { background: var(--thinking-bg); color: #c4b5fd; }
+
+  .tool-call .collapsible-header { background: var(--tool-bg); color: var(--accent); }
+  .tool-call .collapsible-body { background: var(--tool-bg); }
+
+  .tool-result-block .collapsible-header { background: #111518; color: var(--text-muted); }
+  .tool-result-block .collapsible-body { background: #111518; color: var(--text-muted); }
+
+  /* --- Tool detail rendering --- */
+  .tool-detail { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }
+  .tool-detail-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
+  .tool-detail-filepath { color: var(--accent); font-weight: 600; font-size: 13px; margin-bottom: 8px; font-family: 'Cascadia Code', 'Fira Code', monospace; }
+  .tool-detail-code {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 12px; font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 12px; line-height: 1.5; overflow-x: auto; white-space: pre; margin: 6px 0;
+    max-height: 500px; overflow-y: auto;
+  }
+  .tool-detail-desc { color: var(--text-muted); font-size: 12px; font-style: italic; margin-bottom: 6px; }
+  .tool-detail-diff { margin: 6px 0; }
+  .tool-detail-diff .diff-del { background: rgba(248,81,73,0.15); color: #f85149; display: block; padding: 1px 6px; border-radius: 2px; }
+  .tool-detail-diff .diff-add { background: rgba(63,185,80,0.15); color: #3fb950; display: block; padding: 1px 6px; border-radius: 2px; }
+  .tool-detail-cmd {
+    background: #1a1a2e; border: 1px solid var(--thinking-border); border-radius: 6px;
+    padding: 8px 12px; font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 12px; color: #c4b5fd; margin: 6px 0;
+  }
+  .tool-detail-json {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 12px; font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 11px; color: var(--text-muted); margin: 6px 0;
+    max-height: 300px; overflow-y: auto;
+  }
+
+  .tool-name { font-weight: 600; color: var(--accent); }
+
+  /* --- Turn dividers --- */
+  .turn-divider {
+    max-width: 950px; margin: 16px auto 8px;
+    border-top: 1px dashed var(--border); position: relative;
+  }
+  .turn-divider-label {
+    position: absolute; top: -9px; left: 0;
+    background: var(--bg); padding: 0 8px;
+    font-size: 11px; font-weight: 700; color: var(--warning); letter-spacing: 0.5px;
+  }
+
+  /* --- Fork UI --- */
+  .fork-banner {
+    max-width: 950px; margin: 16px auto; padding: 12px 16px;
+    border: 2px solid var(--fork-color); border-radius: 8px; background: var(--fork-bg);
+  }
+  .fork-banner h3 { color: var(--fork-color); font-size: 14px; margin-bottom: 8px; }
+  .fork-banner .info { font-size: 12px; color: var(--text-muted); margin: 4px 0; }
+
+  /* --- Permission cards --- */
+  .perm-card {
+    background: var(--surface2); border: 2px solid var(--warning); border-radius: 6px;
+    padding: 10px 12px; margin: 8px 0;
+  }
+  .perm-card.decided { border-color: var(--border); opacity: 0.7; }
+  .perm-header { font-size: 11px; font-weight: 600; color: var(--warning); text-transform: uppercase; margin-bottom: 4px; }
+  .perm-tool { font-weight: 600; color: var(--accent); font-size: 13px; }
+  .perm-input {
+    margin: 6px 0; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 11px;
+    max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  .perm-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .perm-actions button {
+    padding: 4px 14px; border: none; border-radius: 4px; cursor: pointer;
+    font-size: 12px; font-weight: 600;
+  }
+  .btn-allow { background: var(--success); color: #fff; }
+  .btn-deny { background: var(--error); color: #fff; }
+  .btn-allow:hover, .btn-deny:hover { opacity: 0.9; }
+  .perm-decided { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
+
+  .info { font-size: 12px; color: var(--text-muted); margin: 4px 0; }
+  .stream-text { white-space: pre-wrap; word-break: break-word; }
+  .error-msg { color: var(--error); background: rgba(248,81,73,0.1); padding: 8px; border-radius: 4px; margin: 6px 0; }
+  .hidden { display: none !important; }
+
+  .jump-to-top {
+    position: fixed; bottom: 20px; right: 20px; width: 40px; height: 40px;
+    border-radius: 50%; background: var(--accent); color: #fff; border: none;
+    cursor: pointer; font-size: 18px; display: none; align-items: center;
+    justify-content: center; box-shadow: 0 2px 8px rgba(0,0,0,0.4); z-index: 100;
+  }
+  .jump-to-top.visible { display: flex; }
+</style>
+</head>
+<body>
+
+<!-- Upload screen -->
+<div id="upload-screen">
+  <div class="drop-area" id="drop-area">
+    <h2>cc-replay</h2>
+    <p>Drop a Claude Code <code>.jsonl</code> transcript here, or click to browse.</p>
+    <p style="margin-top:12px;font-size:12px;color:var(--text-muted)">
+      View, replay, and fork conversations at any point.
+    </p>
+  </div>
+  <input type="file" class="file-input" id="file-input" accept=".jsonl">
+</div>
+
+<!-- Main viewer -->
+<div id="viewer">
+  <header>
+    <h1>cc-replay</h1>
+    <span class="meta" id="session-meta">Loading...</span>
+  </header>
+  <div class="controls">
+    <label><input type="checkbox" id="show-thinking" checked> Thinking</label>
+    <label><input type="checkbox" id="show-meta"> Meta/Skill</label>
+    <label><input type="checkbox" id="show-tool-results" checked> Tool Results</label>
+    <label>Effort: <select id="fork-effort"><option value="medium">medium</option><option value="high" selected>high</option><option value="max">max</option></select></label>
+    <input type="text" id="search" placeholder="Search...">
+    <button class="load-new-btn" id="load-new-btn">Load new</button>
+    <span class="stats" id="stats"></span>
+  </div>
+  <div id="messages-container"></div>
+</div>
+
+<button class="jump-to-top" id="jump-top" title="Jump to top">&uarr;</button>
+
+<script>
+let transcriptEvents = [];
+let pollingInterval = null;
+let currentProcessId = null;
+let currentOutputDiv = null;
+const renderedPermIds = new Set();
+
+const uploadScreen = document.getElementById('upload-screen');
+const viewerEl = document.getElementById('viewer');
+const dropArea = document.getElementById('drop-area');
+const fileInput = document.getElementById('file-input');
+const container = document.getElementById('messages-container');
+const showThinking = document.getElementById('show-thinking');
+const showMeta = document.getElementById('show-meta');
+const showToolResults = document.getElementById('show-tool-results');
+const searchInput = document.getElementById('search');
+const jumpTop = document.getElementById('jump-top');
+
+// --- Init ---
+async function init() {
+  const resp = await fetch('/api/status');
+  const status = await resp.json();
+  if (status.loaded) {
+    await loadTranscript();
+  } else {
+    showUploadScreen();
+  }
+}
+
+function showUploadScreen() {
+  uploadScreen.classList.remove('hidden');
+  uploadScreen.style.display = '';
+  viewerEl.classList.remove('active');
+}
+
+function showViewer() {
+  uploadScreen.classList.add('hidden');
+  uploadScreen.style.display = 'none';
+  viewerEl.classList.add('active');
+}
+
+async function loadTranscript() {
+  const resp = await fetch('/api/transcript');
+  const data = await resp.json();
+  transcriptEvents = data.events;
+  showViewer();
+  updateMeta();
+  renderTranscript();
+}
+
+function updateMeta() {
+  const meta = document.getElementById('session-meta');
+  const first = transcriptEvents.find(e => e.timestamp);
+  const models = [...new Set(transcriptEvents.filter(e => e.model).map(e => e.model))];
+  meta.textContent = `${transcriptEvents.length} events` +
+    (models.length ? ` | ${models.join(', ')}` : '') +
+    (first ? ` | ${new Date(first.timestamp).toLocaleString()}` : '');
+}
+
+// --- Upload ---
+dropArea.addEventListener('click', () => fileInput.click());
+dropArea.addEventListener('dragover', e => { e.preventDefault(); dropArea.classList.add('dragover'); });
+dropArea.addEventListener('dragleave', () => dropArea.classList.remove('dragover'));
+dropArea.addEventListener('drop', e => {
+  e.preventDefault();
+  dropArea.classList.remove('dragover');
+  const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.jsonl'));
+  if (files.length) uploadFile(files[0]);
+});
+fileInput.addEventListener('change', e => {
+  if (e.target.files.length) uploadFile(e.target.files[0]);
+});
+
+document.getElementById('load-new-btn').addEventListener('click', () => {
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = '.jsonl';
+  input.onchange = () => { if (input.files.length) uploadFile(input.files[0]); };
+  input.click();
+});
+
+async function uploadFile(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  const resp = await fetch('/api/upload', { method: 'POST', body: formData });
+  const data = await resp.json();
+  if (data.num_events > 0) {
+    await loadTranscript();
+  }
+}
+
+// --- Transcript Rendering ---
+function renderTranscript() {
+  container.innerHTML = '';
+  const fragment = document.createDocumentFragment();
+
+  let turnCount = 0;
+  let lastUserIndex = -1;
+
+  for (const event of transcriptEvents) {
+    // Turn dividers: each non-meta user message with text content starts a new turn
+    if (event.type === 'user' && !event.is_meta) {
+      const content = event.content;
+      const isToolResult = Array.isArray(content) && content.every(b =>
+        typeof b === 'object' && (b.type === 'tool_result' || b.type === 'tool_reference'));
+      if (!isToolResult) {
+        turnCount++;
+        const divider = document.createElement('div');
+        divider.className = 'turn-divider';
+        divider.dataset.type = 'turn-divider';
+        const label = document.createElement('span');
+        label.className = 'turn-divider-label';
+        label.textContent = `Turn ${turnCount}`;
+        if (event.timestamp) label.textContent += ` - ${new Date(event.timestamp).toLocaleTimeString()}`;
+        divider.appendChild(label);
+        fragment.appendChild(divider);
+      }
+    }
+
+    const el = renderEvent(event);
+    if (el) fragment.appendChild(el);
+  }
+
+  container.appendChild(fragment);
+  document.getElementById('stats').textContent = `${transcriptEvents.length} events, ${turnCount} turns`;
+}
+
+function renderEvent(event) {
+  if (event.type === 'user') return renderUserEvent(event);
+  if (event.type === 'assistant') return renderAssistantEvent(event);
+  return null;
+}
+
+function renderUserEvent(event) {
+  const div = document.createElement('div');
+  div.className = 'message role-user';
+  div.dataset.index = event.index;
+  div.dataset.type = 'user';
+  if (event.is_meta) {
+    div.dataset.isMeta = 'true';
+    if (!showMeta.checked) div.style.display = 'none';
+  }
+
+  const header = document.createElement('div');
+  header.className = 'msg-header';
+  header.appendChild(mkEl('span', 'role-badge', 'USER'));
+  if (event.is_meta) header.appendChild(mkEl('span', 'meta-tag', 'meta'));
+  if (event.timestamp) header.appendChild(mkEl('span', 'timestamp', new Date(event.timestamp).toLocaleTimeString()));
+  header.appendChild(mkEl('span', 'line-tag', `L${event.line_num}`));
+  div.appendChild(header);
+  div.appendChild(makeForkBtn(event.index));
+
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  const content = event.content;
+  if (typeof content === 'string') {
+    body.innerHTML = formatText(content);
+  } else if (Array.isArray(content)) {
+    for (const block of content) {
+      if (block.type === 'text') body.appendChild(makeFoldable(block.text));
+      else if (block.type === 'tool_result') body.appendChild(makeToolResultBlock(block));
+    }
+  }
+  div.appendChild(body);
+  return div;
+}
+
+function renderAssistantEvent(event) {
+  const div = document.createElement('div');
+  div.className = 'message role-assistant';
+  div.dataset.index = event.index;
+  div.dataset.type = 'assistant';
+
+  const header = document.createElement('div');
+  header.className = 'msg-header';
+  header.appendChild(mkEl('span', 'role-badge', 'ASSISTANT'));
+  if (event.model) header.appendChild(mkEl('span', 'model-tag', event.model));
+  if (event.timestamp) header.appendChild(mkEl('span', 'timestamp', new Date(event.timestamp).toLocaleTimeString()));
+  header.appendChild(mkEl('span', 'line-tag', `L${event.line_num}`));
+  if (event.usage) {
+    const u = event.usage;
+    const totalCtx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+    if (totalCtx > 0) {
+      const tag = mkEl('span', 'usage-tag', `ctx:${(totalCtx/1000).toFixed(0)}k out:${((u.output_tokens||0)/1000).toFixed(0)}k`);
+      tag.style.color = totalCtx > 200000 ? 'var(--error)' : totalCtx > 100000 ? 'var(--warning)' : 'var(--text-muted)';
+      tag.title = `Input: ${(u.input_tokens||0).toLocaleString()} | Cache read: ${(u.cache_read_input_tokens||0).toLocaleString()} | Cache create: ${(u.cache_creation_input_tokens||0).toLocaleString()} | Output: ${(u.output_tokens||0).toLocaleString()}`;
+      header.appendChild(tag);
+    }
+  }
+  if (event.stop_reason && event.stop_reason !== 'end_turn') {
+    header.appendChild(mkEl('span', 'meta-tag', event.stop_reason));
+  }
+  div.appendChild(header);
+  div.appendChild(makeForkBtn(event.index));
+
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  if (Array.isArray(event.content)) {
+    for (const block of event.content) {
+      if (block.type === 'text' && block.text && block.text.trim()) {
+        const textDiv = document.createElement('div');
+        textDiv.innerHTML = formatText(block.text);
+        body.appendChild(textDiv);
+      }
+      else if (block.type === 'thinking') {
+        const tb = document.createElement('div');
+        tb.className = 'collapsible thinking-block';
+        tb.dataset.isThinking = 'true';
+        if (!showThinking.checked) tb.style.display = 'none';
+        const hdr = document.createElement('div');
+        hdr.className = 'collapsible-header';
+        hdr.textContent = `Thinking (${(block.thinking || '').length} chars)`;
+        hdr.addEventListener('click', () => tb.classList.toggle('open'));
+        tb.appendChild(hdr);
+        const bd = document.createElement('div');
+        bd.className = 'collapsible-body';
+        let loaded = false;
+        const text = block.thinking || '';
+        hdr.addEventListener('click', () => { if (!loaded) { bd.textContent = text; loaded = true; } }, { once: true });
+        tb.appendChild(bd);
+        body.appendChild(tb);
+      }
+      else if (block.type === 'tool_use') {
+        body.appendChild(makeToolUseBlock(block));
+      }
+    }
+  }
+  div.appendChild(body);
+  return div;
+}
+
+// --- Tool rendering ---
+function makeToolUseBlock(block) {
+  const div = document.createElement('div');
+  div.className = 'collapsible tool-call';
+  const header = document.createElement('div');
+  header.className = 'collapsible-header';
+
+  const name = block.name || 'Tool';
+  const inp = block.input || {};
+  let headerText = '';
+
+  switch (name) {
+    case 'Write': headerText = `Write: ${inp.file_path || '?'}`; break;
+    case 'Edit': headerText = `Edit: ${inp.file_path || '?'}${inp.replace_all ? ' (replace all)' : ''}`; break;
+    case 'Read': headerText = `Read: ${inp.file_path || '?'}${inp.offset ? ` [${inp.offset}:${inp.offset+(inp.limit||2000)}]` : ''}`; break;
+    case 'Bash': headerText = `Bash: ${(inp.description || inp.command || '').slice(0,100)}`; break;
+    case 'Grep': headerText = `Grep: /${inp.pattern || '?'}/${inp.path ? ' in ' + inp.path : ''}`; break;
+    case 'Glob': headerText = `Glob: ${inp.pattern || '?'}${inp.path ? ' in ' + inp.path : ''}`; break;
+    case 'WebSearch': headerText = `WebSearch: "${inp.query || '?'}"`; break;
+    case 'WebFetch': headerText = `WebFetch: ${inp.url || '?'}`; break;
+    case 'Agent': headerText = `Agent: ${inp.description || '?'}`; break;
+    case 'Skill': headerText = `Skill: ${inp.skill || '?'}`; break;
+    case 'ToolSearch': headerText = `ToolSearch: ${inp.query || '?'}`; break;
+    default: headerText = `${name}: ${(inp.file_path || inp.command || inp.query || inp.description || JSON.stringify(inp).slice(0,80))}`;
+  }
+
+  header.innerHTML = `<span class="tool-name">${escapeHtml(headerText)}</span>`;
+  header.addEventListener('click', () => div.classList.toggle('open'));
+
+  const body = document.createElement('div');
+  body.className = 'collapsible-body tool-detail';
+  body.innerHTML = renderToolBody(name, inp);
+
+  div.appendChild(header);
+  div.appendChild(body);
+  return div;
+}
+
+function renderToolBody(name, inp) {
+  switch (name) {
+    case 'Write': return renderWriteBody(inp);
+    case 'Edit': return renderEditBody(inp);
+    case 'Read': return renderReadBody(inp);
+    case 'Bash': return renderBashBody(inp);
+    case 'Grep': return renderGrepBody(inp);
+    case 'Glob': return renderGlobBody(inp);
+    case 'WebSearch': return renderWebSearchBody(inp);
+    case 'WebFetch': return renderWebFetchBody(inp);
+    case 'Agent': return renderAgentBody(inp);
+    default: return `<div class="tool-detail-json">${escapeHtml(JSON.stringify(inp, null, 2))}</div>`;
+  }
+}
+
+function renderWriteBody(inp) {
+  return `
+    <div class="tool-detail-label">Write File</div>
+    <div class="tool-detail-filepath">${escapeHtml(inp.file_path || '?')}</div>
+    <div class="tool-detail-label">Content (${(inp.content||'').split('\n').length} lines)</div>
+    <div class="tool-detail-code">${escapeHtml(inp.content || '')}</div>
+  `;
+}
+
+function renderEditBody(inp) {
+  const lines = [];
+  lines.push(`<div class="tool-detail-label">Edit File${inp.replace_all ? ' (replace all)' : ''}</div>`);
+  lines.push(`<div class="tool-detail-filepath">${escapeHtml(inp.file_path || '?')}</div>`);
+  if (inp.old_string != null && inp.new_string != null) {
+    lines.push(`<div class="tool-detail-label">Remove</div><div class="tool-detail-diff">`);
+    for (const l of (inp.old_string || '').split('\n')) lines.push(`<span class="diff-del">- ${escapeHtml(l)}</span>`);
+    lines.push(`</div><div class="tool-detail-label">Insert</div><div class="tool-detail-diff">`);
+    for (const l of (inp.new_string || '').split('\n')) lines.push(`<span class="diff-add">+ ${escapeHtml(l)}</span>`);
+    lines.push(`</div>`);
+  } else {
+    lines.push(`<div class="tool-detail-json">${escapeHtml(JSON.stringify(inp, null, 2))}</div>`);
+  }
+  return lines.join('\n');
+}
+
+function renderReadBody(inp) {
+  const parts = [`<div class="tool-detail-label">Read File</div>`];
+  parts.push(`<div class="tool-detail-filepath">${escapeHtml(inp.file_path || '?')}</div>`);
+  if (inp.offset || inp.limit) parts.push(`<div class="tool-detail-desc">Lines ${inp.offset||0} to ${(inp.offset||0)+(inp.limit||2000)}</div>`);
+  return parts.join('\n');
+}
+
+function renderBashBody(inp) {
+  const parts = [];
+  if (inp.description) parts.push(`<div class="tool-detail-desc">${escapeHtml(inp.description)}</div>`);
+  parts.push(`<div class="tool-detail-label">Command</div>`);
+  parts.push(`<div class="tool-detail-cmd">${escapeHtml(inp.command || '')}</div>`);
+  if (inp.timeout) parts.push(`<div class="tool-detail-desc">Timeout: ${(inp.timeout/1000).toFixed(0)}s</div>`);
+  return parts.join('\n');
+}
+
+function renderGrepBody(inp) {
+  const parts = [`<div class="tool-detail-label">Pattern</div>`, `<div class="tool-detail-cmd">${escapeHtml(inp.pattern || '?')}</div>`];
+  if (inp.path) parts.push(`<div class="tool-detail-desc">In: ${escapeHtml(inp.path)}</div>`);
+  if (inp.glob) parts.push(`<div class="tool-detail-desc">Glob: ${escapeHtml(inp.glob)}</div>`);
+  return parts.join('\n');
+}
+
+function renderGlobBody(inp) {
+  return `<div class="tool-detail-label">Pattern</div><div class="tool-detail-cmd">${escapeHtml(inp.pattern || '?')}</div>${inp.path ? `<div class="tool-detail-desc">In: ${escapeHtml(inp.path)}</div>` : ''}`;
+}
+
+function renderWebSearchBody(inp) {
+  return `<div class="tool-detail-label">Search Query</div><div class="tool-detail-cmd">${escapeHtml(inp.query || '?')}</div>${inp.allowed_domains ? `<div class="tool-detail-desc">Domains: ${escapeHtml(inp.allowed_domains.join(', '))}</div>` : ''}`;
+}
+
+function renderWebFetchBody(inp) {
+  return `<div class="tool-detail-label">Fetch URL</div><div class="tool-detail-filepath">${escapeHtml(inp.url || '?')}</div>${inp.prompt ? `<div class="tool-detail-label">Prompt</div><div class="tool-detail-desc">${escapeHtml(inp.prompt)}</div>` : ''}`;
+}
+
+function renderAgentBody(inp) {
+  const parts = [];
+  if (inp.description) parts.push(`<div class="tool-detail-desc">${escapeHtml(inp.description)}</div>`);
+  if (inp.subagent_type) parts.push(`<div class="tool-detail-desc">Type: ${escapeHtml(inp.subagent_type)}</div>`);
+  if (inp.prompt) {
+    parts.push(`<div class="tool-detail-label">Prompt</div>`);
+    parts.push(`<div class="tool-detail-code">${escapeHtml(inp.prompt)}</div>`);
+  }
+  return parts.join('\n');
+}
+
+function makeToolResultBlock(block) {
+  const div = document.createElement('div');
+  div.className = 'collapsible tool-result-block';
+  div.dataset.isToolResult = 'true';
+  if (!showToolResults.checked) div.style.display = 'none';
+
+  const c = block.content;
+  const text = typeof c === 'string' ? c : JSON.stringify(c, null, 2);
+  const isError = block.is_error || text.startsWith('Error:');
+  const preview = text.slice(0, 120).replace(/\n/g, ' ');
+
+  const header = document.createElement('div');
+  header.className = 'collapsible-header';
+  if (isError) header.style.color = 'var(--error)';
+  header.textContent = `${isError ? 'Error' : 'Result'}: ${preview}${text.length > 120 ? '...' : ''}`;
+  header.addEventListener('click', () => div.classList.toggle('open'));
+
+  const body = document.createElement('div');
+  body.className = 'collapsible-body';
+  let loaded = false;
+  header.addEventListener('click', () => { if (!loaded) { body.textContent = text; loaded = true; } }, { once: true });
+
+  div.appendChild(header);
+  div.appendChild(body);
+  return div;
+}
+
+// --- Fork ---
+async function doFork(eventIndex) {
+  document.querySelectorAll('.fork-banner, .fork-output').forEach(b => b.remove());
+  if (currentProcessId) {
+    fetch(`/api/stop/${currentProcessId}`, { method: 'POST' });
+    currentProcessId = null;
+  }
+
+  Array.from(container.querySelectorAll('.message, .turn-divider')).forEach(msg => {
+    const idx = parseInt(msg.dataset.index);
+    if (!isNaN(idx) && idx > eventIndex) msg.remove();
+  });
+
+  const banner = document.createElement('div');
+  banner.className = 'fork-banner';
+  banner.innerHTML = `
+    <h3>Fork at event #${eventIndex}</h3>
+    <div style="display:flex;gap:8px;align-items:flex-end;margin-top:8px">
+      <textarea id="fork-prompt" placeholder="Message (empty = continue with original tool result, only works on tool_use events)" style="flex:1;min-height:38px;max-height:150px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:4px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+      <button onclick="runFork(${eventIndex})" style="background:var(--fork-color);border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600;white-space:nowrap">Run</button>
+      <button onclick="cancelFork()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px">Cancel</button>
+    </div>
+  `;
+
+  const msg = container.querySelector(`.message[data-index="${eventIndex}"]`);
+  if (msg && msg.nextSibling) container.insertBefore(banner, msg.nextSibling);
+  else container.appendChild(banner);
+  banner.scrollIntoView({ block: 'center' });
+  document.getElementById('fork-prompt').focus();
+}
+
+async function cancelFork() {
+  document.querySelectorAll('.fork-banner, .fork-output').forEach(b => b.remove());
+  if (currentProcessId) {
+    await fetch(`/api/stop/${currentProcessId}`, { method: 'POST' });
+    currentProcessId = null;
+  }
+  currentOutputDiv = null;
+  renderedPermIds.clear();
+  stopPolling();
+  renderTranscript();
+}
+
+async function runFork(eventIndex) {
+  const promptEl = document.getElementById('fork-prompt');
+  const prompt = promptEl ? promptEl.value.trim() : '';
+  const effort = document.getElementById('fork-effort').value;
+
+  const banner = document.querySelector('.fork-banner');
+  if (banner) banner.innerHTML = '<h3 style="color:var(--fork-color)">Starting Claude Code...</h3>';
+
+  const resp = await fetch('/api/fork-and-run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fork_index: eventIndex, prompt, effort }),
+  });
+  const data = await resp.json();
+  if (data.error) {
+    if (banner) banner.innerHTML = `<h3 style="color:var(--error)">Error: ${escapeHtml(data.error)}</h3><button onclick="cancelFork()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;margin-top:8px">Back</button>`;
+    return;
+  }
+
+  currentProcessId = data.process_id;
+  renderedPermIds.clear();
+
+  if (banner) {
+    banner.innerHTML = `
+      <h3>Claude Code running (forked at L${data.fork_at_line})</h3>
+      <div class="info">${data.truncated_lines} / ${data.total_lines} lines | Mode: <strong>${data.mode}</strong> | Session: ${data.session_id}</div>
+      <button onclick="cancelFork()" style="background:var(--error);border:none;color:#fff;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin-top:4px">Stop</button>
+    `;
+  }
+
+  startPolling();
+
+  const outputDiv = document.createElement('div');
+  outputDiv.className = 'fork-output';
+  outputDiv.style.cssText = 'max-width:950px;margin:8px auto;';
+  if (banner) banner.after(outputDiv);
+  else container.appendChild(outputDiv);
+  currentOutputDiv = outputDiv;
+
+  if (data.tool_result_sent) {
+    const trDiv = document.createElement('div');
+    trDiv.className = 'message role-user';
+    const hdr = document.createElement('div');
+    hdr.className = 'msg-header';
+    hdr.appendChild(mkEl('span', 'role-badge', 'REPLAYED TOOL RESULT'));
+    trDiv.appendChild(hdr);
+    const body = document.createElement('div');
+    body.className = 'msg-body';
+    for (const block of data.tool_result_sent) {
+      if (block.type === 'tool_result') body.appendChild(makeToolResultBlock(block));
+      else if (block.type === 'text') body.appendChild(makeFoldable(block.text));
+    }
+    trDiv.appendChild(body);
+    outputDiv.appendChild(trDiv);
+  }
+
+  const eventSource = new EventSource(`/api/stream/${data.process_id}`);
+  let currentAssistantBody = null;
+
+  eventSource.onmessage = (sseEvent) => {
+    let event;
+    try { event = JSON.parse(sseEvent.data); } catch { return; }
+
+    if (event.type === 'system') {
+      outputDiv.appendChild(mkEl('div', 'info', `Model: ${event.model} | Session: ${event.session_id}`));
+    }
+
+    else if (event.type === 'assistant') {
+      const msg = event.message;
+      if (!msg || !msg.content) return;
+      if (!currentAssistantBody) {
+        const div = document.createElement('div');
+        div.className = 'message role-assistant';
+        const hdr = document.createElement('div');
+        hdr.className = 'msg-header';
+        hdr.appendChild(mkEl('span', 'role-badge', 'ASSISTANT'));
+        if (msg.model) hdr.appendChild(mkEl('span', 'model-tag', msg.model));
+        div.appendChild(hdr);
+        currentAssistantBody = document.createElement('div');
+        currentAssistantBody.className = 'msg-body';
+        div.appendChild(currentAssistantBody);
+        outputDiv.appendChild(div);
+      }
+      for (const block of msg.content) {
+        if (block.type === 'text' && block.text) {
+          let textEl = currentAssistantBody.querySelector('.stream-text:last-child');
+          if (!textEl) { textEl = document.createElement('div'); textEl.className = 'stream-text'; currentAssistantBody.appendChild(textEl); }
+          textEl.textContent += block.text;
+        }
+        else if (block.type === 'thinking' && block.thinking) {
+          const tb = document.createElement('div');
+          tb.className = 'collapsible thinking-block'; tb.dataset.isThinking = 'true';
+          if (!showThinking.checked) tb.style.display = 'none';
+          const hdr = document.createElement('div');
+          hdr.className = 'collapsible-header';
+          hdr.textContent = `Thinking (${block.thinking.length} chars)`;
+          hdr.addEventListener('click', () => tb.classList.toggle('open'));
+          const bd = document.createElement('div');
+          bd.className = 'collapsible-body';
+          bd.textContent = block.thinking;
+          tb.appendChild(hdr); tb.appendChild(bd);
+          currentAssistantBody.appendChild(tb);
+        }
+        else if (block.type === 'tool_use') {
+          currentAssistantBody.appendChild(makeToolUseBlock(block));
+        }
+      }
+    }
+
+    else if (event.type === 'user') {
+      currentAssistantBody = null;
+      const msg = event.message;
+      if (!msg || !msg.content) return;
+      const div = document.createElement('div');
+      div.className = 'message role-user';
+      const hdr = document.createElement('div');
+      hdr.className = 'msg-header';
+      hdr.appendChild(mkEl('span', 'role-badge', 'TOOL RESULT'));
+      div.appendChild(hdr);
+      const body = document.createElement('div');
+      body.className = 'msg-body';
+      const content = msg.content;
+      if (typeof content === 'string') body.appendChild(makeFoldable(content));
+      else if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block.type === 'tool_result') body.appendChild(makeToolResultBlock(block));
+          else if (block.type === 'text') body.appendChild(makeFoldable(block.text));
+        }
+      }
+      div.appendChild(body);
+      outputDiv.appendChild(div);
+    }
+
+    else if (event.type === 'result') {
+      currentAssistantBody = null;
+      const rd = document.createElement('div');
+      rd.style.cssText = 'font-size:11px;color:var(--text-muted);padding:8px 0;max-width:950px;margin:0 auto;border-top:1px solid var(--border);margin-top:8px;';
+      rd.textContent = `Done (${event.stop_reason}) | ${event.num_turns} turn(s) | $${(event.total_cost_usd||0).toFixed(4)} | ${((event.duration_ms||0)/1000).toFixed(1)}s`;
+      outputDiv.appendChild(rd);
+      if (banner) { const h3 = banner.querySelector('h3'); if (h3) h3.textContent = 'Claude Code finished'; }
+      eventSource.close();
+      currentProcessId = null;
+      stopPolling();
+    }
+
+    else if (event.type === 'stderr') {
+      const d = document.createElement('div');
+      d.style.cssText = 'font-size:11px;color:var(--warning);background:rgba(210,153,34,0.1);padding:6px 10px;border-radius:4px;margin:6px 0;white-space:pre-wrap;font-family:monospace;';
+      d.textContent = (event.lines || []).join('\n');
+      outputDiv.appendChild(d);
+    }
+
+    else if (event.type === 'process_exit' || event.type === 'error') {
+      eventSource.close();
+      currentProcessId = null;
+      stopPolling();
+      if (event.type === 'error') outputDiv.appendChild(mkEl('div', 'error-msg', `Error: ${event.error}`));
+      if (event.type === 'process_exit' && event.return_code !== 0) outputDiv.appendChild(mkEl('div', 'error-msg', `Process exited with code ${event.return_code}`));
+    }
+  };
+
+  eventSource.onerror = () => { eventSource.close(); currentProcessId = null; stopPolling(); };
+}
+
+// --- Permission Polling ---
+function startPolling() {
+  if (pollingInterval) clearInterval(pollingInterval);
+  pollingInterval = setInterval(pollPermissions, 1000);
+  pollPermissions();
+}
+
+function stopPolling() {
+  if (pollingInterval) { clearInterval(pollingInterval); pollingInterval = null; }
+}
+
+async function pollPermissions() {
+  if (!currentOutputDiv) return;
+  try {
+    const resp = await fetch('/api/permissions');
+    const data = await resp.json();
+
+    for (const perm of [...data.pending, ...data.recent]) {
+      if (renderedPermIds.has(perm.id)) {
+        const existing = document.getElementById(`perm-${perm.id}`);
+        if (existing && perm.decided) {
+          existing.className = 'perm-card decided';
+          const actions = existing.querySelector('.perm-actions');
+          if (actions) actions.innerHTML = `<div class="perm-decided">${perm.decision?.behavior === 'allow' ? 'Allowed' : 'Denied'}</div>`;
+        }
+        continue;
+      }
+
+      renderedPermIds.add(perm.id);
+      const card = renderPermissionCard(perm);
+      currentOutputDiv.appendChild(card);
+      card.scrollIntoView({ block: 'end' });
+    }
+  } catch (e) {}
+}
+
+function renderPermissionCard(perm) {
+  const card = document.createElement('div');
+  card.className = `perm-card ${perm.decided ? 'decided' : ''}`;
+  card.id = `perm-${perm.id}`;
+
+  card.appendChild(mkEl('div', 'perm-header', 'Permission Request'));
+
+  const toolName = document.createElement('div');
+  toolName.className = 'perm-tool';
+  toolName.textContent = perm.tool_name;
+  card.appendChild(toolName);
+
+  const input = perm.tool_input || {};
+  const inputDiv = document.createElement('div');
+  inputDiv.className = 'perm-input';
+
+  if (perm.tool_name === 'Write' && input.file_path) {
+    inputDiv.textContent = `File: ${input.file_path}\n\n${input.content || ''}`;
+  } else if (perm.tool_name === 'Edit' && input.file_path) {
+    inputDiv.textContent = `File: ${input.file_path}\n\n- ${input.old_string || ''}\n+ ${input.new_string || ''}`;
+  } else if ((perm.tool_name === 'Bash' || perm.tool_name === 'PowerShell') && input.command) {
+    inputDiv.textContent = `$ ${input.command}${input.description ? '\n# ' + input.description : ''}`;
+  } else {
+    inputDiv.textContent = JSON.stringify(input, null, 2);
+  }
+  card.appendChild(inputDiv);
+
+  if (perm.decided) {
+    card.appendChild(mkEl('div', 'perm-decided', `${perm.decision?.behavior === 'allow' ? 'Allowed' : 'Denied'}`));
+  } else {
+    const actions = document.createElement('div');
+    actions.className = 'perm-actions';
+    const allowBtn = document.createElement('button');
+    allowBtn.className = 'btn-allow'; allowBtn.textContent = 'Allow';
+    allowBtn.onclick = () => decidePerm(perm.id, 'allow');
+    const denyBtn = document.createElement('button');
+    denyBtn.className = 'btn-deny'; denyBtn.textContent = 'Deny';
+    denyBtn.onclick = () => decidePerm(perm.id, 'deny');
+    actions.appendChild(allowBtn);
+    actions.appendChild(denyBtn);
+    card.appendChild(actions);
+  }
+
+  return card;
+}
+
+async function decidePerm(reqId, behavior) {
+  await fetch(`/api/permissions/${reqId}/decide`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ behavior }),
+  });
+  const card = document.getElementById(`perm-${reqId}`);
+  if (card) {
+    card.className = 'perm-card decided';
+    const actions = card.querySelector('.perm-actions');
+    if (actions) actions.innerHTML = `<div class="perm-decided">${behavior === 'allow' ? 'Allowed' : 'Denied'}</div>`;
+  }
+}
+
+// --- Helpers ---
+function mkEl(tag, className, text) {
+  const e = document.createElement(tag);
+  if (className) e.className = className;
+  if (text) e.textContent = text;
+  return e;
+}
+
+function makeForkBtn(index) {
+  const btn = document.createElement('button');
+  btn.className = 'fork-btn'; btn.textContent = 'Fork';
+  btn.onclick = (e) => { e.stopPropagation(); doFork(index); };
+  return btn;
+}
+
+function makeFoldable(text, previewLen = 300) {
+  if (!text || text.length <= previewLen) {
+    const d = document.createElement('div');
+    d.textContent = text || '';
+    return d;
+  }
+  const wrapper = document.createElement('div');
+  wrapper.className = 'collapsible';
+  const header = document.createElement('div');
+  header.className = 'collapsible-header';
+  header.textContent = text.substring(0, previewLen).replace(/\n/g, ' ').substring(0, 120) + `... (${text.length} chars)`;
+  const body = document.createElement('div');
+  body.className = 'collapsible-body';
+  let loaded = false;
+  header.onclick = () => { if (!loaded) { body.textContent = text; loaded = true; } wrapper.classList.toggle('open'); };
+  wrapper.appendChild(header); wrapper.appendChild(body);
+  return wrapper;
+}
+
+function formatText(text) {
+  if (!text) return '';
+  let html = escapeHtml(text);
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\n/g, '<br>');
+  return html;
+}
+
+function escapeHtml(text) {
+  const d = document.createElement('div');
+  d.textContent = text;
+  return d.innerHTML;
+}
+
+// --- Toggles ---
+showThinking.addEventListener('change', () => {
+  container.querySelectorAll('[data-is-thinking]').forEach(el => { el.style.display = showThinking.checked ? '' : 'none'; });
+});
+showMeta.addEventListener('change', () => {
+  container.querySelectorAll('[data-is-meta]').forEach(el => { el.style.display = showMeta.checked ? '' : 'none'; });
+});
+showToolResults.addEventListener('change', () => {
+  container.querySelectorAll('[data-is-tool-result]').forEach(el => { el.style.display = showToolResults.checked ? '' : 'none'; });
+});
+
+// --- Search ---
+searchInput.addEventListener('input', () => {
+  const q = searchInput.value.toLowerCase();
+  container.querySelectorAll('.message').forEach(msg => {
+    if (!q) { msg.classList.remove('hidden'); return; }
+    msg.classList.toggle('hidden', !msg.textContent.toLowerCase().includes(q));
+  });
+});
+
+// --- Scroll ---
+container.addEventListener('scroll', () => {
+  jumpTop.classList.toggle('visible', container.scrollTop > 500);
+});
+jumpTop.addEventListener('click', () => container.scrollTo({ top: 0, behavior: 'smooth' }));
+
+init();
+</script>
+</body>
+</html>
